@@ -1515,6 +1515,46 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Operation cancelled.")
     return ConversationHandler.END
 
+# ---------- Add after admin_clear ----------
+@admin_required
+async def admin_refresh_proxies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch fresh proxies from online sources"""
+    msg = await update.message.reply_text("🔄 Fetching fresh proxies...")
+    try:
+        # Use one of the reliable proxy sources
+        import aiohttp
+        sources = [
+            "https://raw.githubusercontent.com/gproxynet/free-proxy-list/main/all.txt",
+            "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt",
+            "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt"
+        ]
+        new_proxies = []
+        async with aiohttp.ClientSession() as session:
+            for src in sources:
+                try:
+                    async with session.get(src, timeout=10) as resp:
+                        if resp.status == 200:
+                            text = await resp.text()
+                            lines = [line.strip() for line in text.splitlines() if line.strip()]
+                            for line in lines:
+                                if ':' in line:
+                                    # If no protocol, add http://
+                                    if not line.startswith('http'):
+                                        new_proxies.append(f"http://{line}")
+                                    else:
+                                        new_proxies.append(line)
+                            break
+                except:
+                    continue
+        if new_proxies:
+            global _all_proxies
+            _all_proxies = list(set(_all_proxies + new_proxies))
+            await msg.edit_text(f"✅ Added {len(new_proxies)} fresh proxies. Total: {len(_all_proxies)}")
+        else:
+            await msg.edit_text("❌ Could not fetch fresh proxies. Try again later.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)}")
+
 # ----------------------------- MAIN APPLICATION ------------------------
 def main():
     if not BOT_TOKEN:
@@ -1538,6 +1578,7 @@ def main():
     application.add_handler(CommandHandler("users", admin_users))
     application.add_handler(CommandHandler("cookies", admin_cookies))
     application.add_handler(CommandHandler("export", admin_export))
+    application.add_handler(CommandHandler("refresh_proxies", admin_refresh_proxies))
     application.add_handler(CommandHandler("cleanup", admin_cleanup))
     application.add_handler(CommandHandler("clear", admin_clear))
     
