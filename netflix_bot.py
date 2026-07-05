@@ -988,7 +988,7 @@ async def admin_disapprove(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Failed to disapprove user.")
     except ValueError:
         await update.message.reply_text("❌ Invalid user ID.")
-  @admin_required
+@admin_required
 async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = list(db.users.find({"user_id": {"$ne": None}}))
     
