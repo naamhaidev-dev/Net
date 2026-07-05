@@ -2,20 +2,15 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+# Copy requirements first
+COPY requirements.txt /app/requirements.txt
 
-# Copy requirements first (for caching)
-COPY requirements.txt .
+# Install dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r /app/requirements.txt
 
-# Install Python dependencies
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# Copy application
+COPY netflix_bot.py /app/netflix_bot.py
 
-# Copy application code
-COPY . .
-
-# Run the bot
-CMD ["python", "netflix_bot.py"]
+# Command
+CMD ["python", "/app/netflix_bot.py"]
