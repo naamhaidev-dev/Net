@@ -526,6 +526,140 @@ class NetflixChecker:
     def _detect_tier(data: Dict) -> str:
         """Detect account tier from response data"""
         # Try to find tier in data
+# ----------------------------- NETFLIX CHECKER ENGINE (FIXED) ------------------
+class NetflixChecker:
+    @staticmethod
+    async def check_single_cookie(cookie: str) -> Dict:
+        """Check a single Netflix cookie - FIXED for 421 error"""
+        result = {
+            "valid": False,
+            "account_tier": None,
+            "profile_name": None,
+            "profile_language": None,
+            "maturity_level": None,
+            "expires_at": None,
+            "error": None
+        }
+        
+        # Parse cookie
+        cookie_dict = parse_cookie(cookie)
+        if not cookie_dict:
+            result["error"] = "Invalid cookie format"
+            return result
+        
+        # Build cookie string
+        cookie_str = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
+        
+        # ✅ FIX 1: Proper headers with Host
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Cookie": cookie_str,
+            "Host": "www.netflix.com",  # ✅ CRITICAL FIX
+            "Origin": "https://www.netflix.com",
+            "Referer": "https://www.netflix.com/",
+            "Connection": "keep-alive",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+            "DNT": "1"
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                profile_url = "https://www.netflix.com/api/shakti/viper/metadata"
+                params = {
+                    "movieid": "80057281",
+                    "image_sizes": "185x278,464x696,50x70,278x185,696x278,70x50,96x96",
+                    "image_format": "webp",
+                    "with_size": "true",
+                    "materialize": "true",
+                    "uncached": "false"
+                }
+                
+                try:
+                    timeout = aiohttp.ClientTimeout(total=CHECK_TIMEOUT, connect=10)
+                    async with session.get(
+                        profile_url, 
+                        headers=headers, 
+                        params=params,
+                        timeout=timeout,
+                        ssl=False
+                    ) as resp:
+                        logger.info(f"Status: {resp.status}")
+                        
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if data and "video" in data:
+                                result["valid"] = True
+                                result["account_tier"] = NetflixChecker._detect_tier(data)
+                                result["profile_name"] = NetflixChecker._get_profile_name(data)
+                                result["profile_language"] = NetflixChecker._get_language(data)
+                                result["maturity_level"] = NetflixChecker._get_maturity(data)
+                                
+                                # Get account details
+                                try:
+                                    account_url = "https://www.netflix.com/api/shakti/viper/user"
+                                    async with session.get(
+                                        account_url,
+                                        headers=headers,
+                                        timeout=timeout,
+                                        ssl=False
+                                    ) as acc_resp:
+                                        if acc_resp.status == 200:
+                                            acc_data = await acc_resp.json()
+                                            if acc_data and "account" in acc_data:
+                                                account = acc_data.get("account", {})
+                                                if "expires" in account:
+                                                    result["expires_at"] = account.get("expires")
+                                except:
+                                    pass
+                                
+                            else:
+                                result["error"] = "No video data found"
+                                
+                        elif resp.status == 401 or resp.status == 403:
+                            result["error"] = "Invalid cookie (unauthorized)"
+                        elif resp.status == 404:
+                            result["error"] = "Account not found"
+                        elif resp.status == 421:
+                            # ✅ FIX 2: Retry with different Host
+                            headers["Host"] = "api.netflix.com"
+                            headers["Origin"] = "https://api.netflix.com"
+                            async with session.get(
+                                profile_url,
+                                headers=headers,
+                                params=params,
+                                timeout=timeout,
+                                ssl=False
+                            ) as retry_resp:
+                                if retry_resp.status == 200:
+                                    data = await retry_resp.json()
+                                    if data and "video" in data:
+                                        result["valid"] = True
+                                        result["account_tier"] = "Unknown"
+                                        result["profile_name"] = "Unknown"
+                                else:
+                                    result["error"] = f"HTTP 421 - Cookie invalid or expired"
+                        else:
+                            result["error"] = f"HTTP {resp.status}"
+                            
+                except asyncio.TimeoutError:
+                    result["error"] = "Timeout"
+                except Exception as e:
+                    result["error"] = str(e)
+        
+        except Exception as e:
+            result["error"] = str(e)
+        
+        return result
+    
+    @staticmethod
+    def _detect_tier(data: Dict) -> str:
         if "video" in data:
             video = data.get("video", {})
             if "tier" in video:
@@ -537,7 +671,6 @@ class NetflixChecker:
                 elif "basic" in tier.lower():
                     return "Basic"
         
-        # Check for features
         if "availableMaturityLevels" in data:
             levels = data.get("availableMaturityLevels", [])
             if len(levels) >= 4:
@@ -551,7 +684,6 @@ class NetflixChecker:
     
     @staticmethod
     def _get_profile_name(data: Dict) -> str:
-        """Get profile name from data"""
         if "profiles" in data:
             profiles = data.get("profiles", [])
             if profiles and "name" in profiles[0]:
@@ -560,43 +692,18 @@ class NetflixChecker:
     
     @staticmethod
     def _get_language(data: Dict) -> str:
-        """Get profile language"""
         if "preferredLanguage" in data:
             return data.get("preferredLanguage")
         return "Unknown"
     
     @staticmethod
     def _get_maturity(data: Dict) -> str:
-        """Get maturity level"""
         if "maturityLevel" in data:
             return data.get("maturityLevel")
         return "Unknown"
     
     @staticmethod
-    async def _detect_tier_from_account(headers: Dict) -> str:
-        """Detect tier from account endpoint"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = "https://www.netflix.com/api/shakti/viper/account"
-                async with session.get(url, headers=headers, timeout=10, ssl=False) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data and "account" in data:
-                            account = data.get("account", {})
-                            plan = account.get("plan", "")
-                            if "premium" in plan.lower():
-                                return "Premium"
-                            elif "standard" in plan.lower():
-                                return "Standard"
-                            elif "basic" in plan.lower():
-                                return "Basic"
-        except:
-            pass
-        return "Unknown"
-    
-    @staticmethod
     async def check_bulk_cookies(cookies: List[str], progress_callback=None) -> List[Dict]:
-        """Check multiple cookies concurrently"""
         results = []
         semaphore = asyncio.Semaphore(CONCURRENT_CHECKS)
         
@@ -612,7 +719,6 @@ class NetflixChecker:
         tasks = [check_one(cookie, i) for i, cookie in enumerate(cookies)]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Process results
         processed = []
         for result in results:
             if isinstance(result, Exception):
@@ -790,26 +896,30 @@ async def bulk_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def handle_bulk_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle uploaded file for bulk check"""
+    """Handle uploaded file for bulk check - FIXED"""
     user_id = update.effective_user.id
     
     if not db.is_user_approved(user_id) and user_id not in ADMIN_IDS:
-        await update.message.reply_text("❌ Please upload a .txt file.")
+        await update.message.reply_text("❌ You are not approved to use this bot.")
         return
     
-    # Check file type
+    # ✅ FIX: document variable define karo
+    document = update.message.document
+    if not document:
+        await update.message.reply_text("❌ No file uploaded.")
+        return
+    
+    # ✅ FIX: .txt check
     if not document.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Only .txt files are supported.")
         return
     
-    # Download file
     msg = await update.message.reply_text("📥 Downloading file...")
     
     try:
         file = await context.bot.get_file(document.file_id)
         file_content = await file.download_as_bytearray()
         
-        # Parse cookies
         cookies = file_content.decode('utf-8', errors='ignore').splitlines()
         cookies = [c.strip() for c in cookies if c.strip()]
         
@@ -824,10 +934,7 @@ async def handle_bulk_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Add cookies to database
         added = db.add_cookies_bulk(cookies, user_id)
-        
-        # Count valid cookies
         valid_cookies = [c for c in added if c.get("status") == "added"]
         
         await msg.edit_text(
@@ -836,16 +943,16 @@ async def handle_bulk_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔄 Starting validation..."
         )
         
-        # Check all cookies
         results = await NetflixChecker.check_bulk_cookies([c["cookie"] for c in added if c.get("status") == "added"])
         
-        # Update results
         valid_count = 0
         response = "📊 *Bulk Check Results*\n\n"
         response += f"Total Cookies: {len(results)}\n"
         
-        for i, result in enumerate(results):
+        for result in results:
             cookie = result.get("cookie", "")
+            if not cookie:
+                continue
             cookie_hash = hashlib.sha256(cookie.encode()).hexdigest()
             cookie_doc = db.get_cookie_by_hash(cookie_hash)
             
