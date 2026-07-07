@@ -765,7 +765,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"  /export – Export valid cookies\n"
         f"  /cleanup – Delete invalid cookies\n"
         f"  /clear – Dangerous: clear all cookies\n\n"
-        f"{get_emoji('🦇')} <b>Developer:</b> @OfficialAnnebella"
+        f"{get_emoji('🦇')} <b>Developer:</b> @Xalonexdev03"
     )
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
